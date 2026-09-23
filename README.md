@@ -34,7 +34,7 @@ Put **home + extra ZIP cities** on **Always show**. They flip while nothing else
 
 ![Home, Kona, and Jacksonville rotating](media/rotate-cities.gif)
 
-Home → Kona → Jacksonville. Each city shows its own clock (CT / HT / ET) and real today high / low. Swipe or tap the dots to skip ahead.
+Home → Kona → Jacksonville. Each city shows its own clock (CT / HT / ET), real today high / low, and sunrise / sunset. Swipe or tap the dots to skip ahead.
 
 | Home | Kona | Jacksonville |
 | :---: | :---: | :---: |
