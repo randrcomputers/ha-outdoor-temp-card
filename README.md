@@ -4,7 +4,7 @@
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=randrcomputers&repository=ha-outdoor-temp-card&category=plugin)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Lovelace **outdoor thermometer** — not a thermostat. Use your backyard sensor at home, or any US **ZIP code** for another city. The big temperature changes color with the weather, the city sits under the number, and the upper-right corner shows that town’s local time (`9:38 PM CT`).
+Lovelace **outdoor thermometer**  Use your backyard sensor at home, or any US **ZIP code** for another city. The big temperature changes color with the weather, the city sits under the number, and the upper-right corner shows that town’s local time (`9:38 PM CT`).
 
 ![Outdoor Temp Plus Card](media/preview.png)
 
