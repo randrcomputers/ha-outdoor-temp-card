@@ -1,0 +1,47 @@
+# Outdoor Temp Plus — example Lovelace cards
+#
+# look: ezread | glass
+# compact: true  fits a 260px activity rotator
+# zip: US ZIP for a remote city (no local sensor needed)
+
+type: custom:outdoor-temp-plus-card
+name: Outdoor
+look: ezread
+size: 100
+entity: sensor.outside_temp_and_humidity_temperature
+humidity_entity: sensor.outside_temp_and_humidity_humidity
+weather_entity: weather.forecast_home
+unit_system: imperial
+history_days: 14
+show_history: true
+show_humidity: true
+show_thermometer: true
+compact: false
+
+# Phone / activity-rotator home card
+# type: custom:outdoor-temp-plus-card
+# name: Outdoor
+# look: ezread
+# compact: true
+# show_history: false
+# show_thermometer: false
+# entity: sensor.outside_temp_and_humidity_temperature
+# humidity_entity: sensor.outside_temp_and_humidity_humidity
+# weather_entity: weather.forecast_home
+
+# Remote cities — rotate with always: true on Activity Rotate Card
+# type: custom:outdoor-temp-plus-card
+# name: Outdoor
+# look: ezread
+# compact: true
+# show_thermometer: false
+# city: Kona
+# zip: "96740"
+#
+# type: custom:outdoor-temp-plus-card
+# name: Outdoor
+# look: ezread
+# compact: true
+# show_thermometer: false
+# city: Jacksonville
+# zip: "32202"
