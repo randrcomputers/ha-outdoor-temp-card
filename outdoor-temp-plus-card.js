@@ -15,6 +15,7 @@
     show_humidity: true,
     show_feels: true,
     show_thermometer: true,
+    show_sun: true,
     compact: false,
     unit_system: "auto",
     scale_min: -20,
@@ -392,7 +393,7 @@
     const url =
       `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
       `&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,is_day` +
-      `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset` +
       `&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}&timezone=auto`;
     const res = await fetch(url);
     if (!res.ok) return null;
@@ -415,8 +416,39 @@
       tzAbbr: data.timezone_abbreviation || "",
       todayHi: parseNumber(daily.temperature_2m_max?.[0]),
       todayLo: parseNumber(daily.temperature_2m_min?.[0]),
+      sunrise: daily.sunrise?.[0] || "",
+      sunset: daily.sunset?.[0] || "",
       forecast,
     };
+  }
+
+  function formatSunTime(iso, timeZone) {
+    const raw = String(iso || "");
+    if (!raw) return "";
+    if (!/Z|[+-]\d{2}:\d{2}$/.test(raw)) {
+      const hm = raw.match(/T(\d{2}):(\d{2})/);
+      if (hm) {
+        let hour = Number(hm[1]);
+        const minute = hm[2];
+        const ap = hour >= 12 ? "PM" : "AM";
+        hour = hour % 12 || 12;
+        return `${hour}:${minute} ${ap}`;
+      }
+    }
+    const d = new Date(raw);
+    if (!Number.isFinite(d.getTime())) return "";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: timeZone || undefined,
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      })
+        .format(d)
+        .replace(/\s*(am|pm)$/i, (m) => ` ${m.trim().toUpperCase()}`);
+    } catch {
+      return "";
+    }
   }
 
   function friendlyZone(raw) {
@@ -491,6 +523,7 @@
         _place: { state: true },
         _remoteWx: { state: true },
         _wxOpen: { state: true },
+        _sun: { state: true },
         _now: { state: true },
       };
     }
@@ -538,6 +571,8 @@
       this._remoteKey = "";
       this._wxOpen = false;
       this._wxHost = null;
+      this._sun = null;
+      this._sunKey = "";
       this._now = Date.now();
       this._clock = 0;
     }
@@ -569,7 +604,10 @@
       this.toggleAttribute("no-thermo", this.config?.show_thermometer === false);
       if (changed.has("hass") || changed.has("config")) {
         this._loadHistory();
-        this._loadPlace().then(() => this._loadForecast());
+        this._loadPlace().then(async () => {
+          await this._loadForecast();
+          await this._loadSunTimes();
+        });
       }
     }
 
@@ -660,6 +698,9 @@
           .ot-wx-root .day ha-icon { --mdc-icon-size:22px; margin:6px 0; color:var(--primary-text-color, #fff); }
           .ot-wx-root .hi { font-size:.9rem; font-weight:650; }
           .ot-wx-root .lo { font-size:.78rem; color:var(--secondary-text-color, #9aa0a6); }
+          .ot-wx-root .sun { display:flex; align-items:center; gap:16px; margin-top:14px; color:var(--secondary-text-color, #9aa0a6); font-size:.9rem; font-weight:650; }
+          .ot-wx-root .sun-item { display:inline-flex; align-items:center; gap:6px; }
+          .ot-wx-root .sun ha-icon { --mdc-icon-size:18px; }
           .ot-wx-root .src { margin-top:14px; font-size:.72rem; color:var(--secondary-text-color, #9aa0a6); }
         </style>
         <div class="bk"></div>
@@ -679,6 +720,11 @@
             <div class="row"><span>Wind speed</span><span>${m.wind != null ? `${m.wind} ${escHtml(m.windUnit)}` : "—"}</span></div>
             <div class="row"><span>Today high / low</span><span>${escHtml(formatTemp(m.hi, m.unit))} / ${escHtml(formatTemp(m.lo, m.unit))}</span></div>
           </div>
+          ${(() => {
+            const sun = this._sunTimes(m);
+            if (!sun) return "";
+            return `<div class="sun">${sun.rise ? `<span class="sun-item"><ha-icon icon="mdi:weather-sunset-up"></ha-icon>${escHtml(sun.rise)}</span>` : ""}${sun.set ? `<span class="sun-item"><ha-icon icon="mdi:weather-sunset-down"></ha-icon>${escHtml(sun.set)}</span>` : ""}</div>`;
+          })()}
           ${days.length ? `<div class="fc-k">Forecast</div><div class="days">${days.map((d) => `
             <div class="day" title="${escHtml(d.title)}">
               <div class="day-n">${escHtml(weekdayLetter(d.start, this.hass))}</div>
@@ -812,6 +858,53 @@
       return this._remoteWx;
     }
 
+    async _loadSunTimes() {
+      if (this.config?.show_sun === false) {
+        this._sun = null;
+        return null;
+      }
+      if (this._remoteWx?.sunrise || this._remoteWx?.sunset) {
+        this._sun = {
+          rise: this._remoteWx.sunrise,
+          set: this._remoteWx.sunset,
+          tz: this._remoteWx.timezone,
+        };
+        return this._sun;
+      }
+      const place = this._place || (await this._loadPlace());
+      const sunSt = entityState(this.hass, "sun.sun");
+      const fallback = sunSt
+        ? {
+            rise: sunSt.attributes?.next_rising,
+            set: sunSt.attributes?.next_setting,
+            tz: this.hass?.config?.time_zone || "",
+          }
+        : null;
+      if (place?.lat == null || place?.lon == null) {
+        this._sun = fallback;
+        return this._sun;
+      }
+      const key = `sun|${place.lat},${place.lon}|${Math.floor(Date.now() / 300000)}`;
+      if (key === this._sunKey && this._sun) return this._sun;
+      this._sunKey = key;
+      try {
+        const res = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${place.lat}&longitude=${place.lon}` +
+            `&daily=sunrise,sunset&timezone=auto`
+        );
+        if (!res.ok) throw new Error("sun");
+        const data = await res.json();
+        this._sun = {
+          rise: data.daily?.sunrise?.[0] || "",
+          set: data.daily?.sunset?.[0] || "",
+          tz: data.timezone || this.hass?.config?.time_zone || "",
+        };
+      } catch {
+        this._sun = fallback;
+      }
+      return this._sun;
+    }
+
     async _loadForecast() {
       await this._loadRemoteWeather();
       if (this._remoteWx?.forecast?.length) {
@@ -904,13 +997,49 @@
       };
     }
 
+    _sunTimes(m) {
+      if (m?.cfg?.show_sun === false) return null;
+      const tz = this._remoteWx?.timezone || this._sun?.tz || this.hass?.config?.time_zone || "";
+      const sunSt = entityState(this.hass, "sun.sun");
+      const rise = formatSunTime(
+        this._remoteWx?.sunrise || this._sun?.rise || sunSt?.attributes?.next_rising,
+        tz
+      );
+      const set = formatSunTime(
+        this._remoteWx?.sunset || this._sun?.set || sunSt?.attributes?.next_setting,
+        tz
+      );
+      if (!rise && !set) return null;
+      return { rise, set };
+    }
+
+    _renderSun(m) {
+      const sun = this._sunTimes(m);
+      if (!sun) return html``;
+      return html`
+        <div class="sun">
+          ${sun.rise
+            ? html`<span class="sun-item"><ha-icon icon="mdi:weather-sunset-up"></ha-icon>${sun.rise}</span>`
+            : ""}
+          ${sun.set
+            ? html`<span class="sun-item"><ha-icon icon="mdi:weather-sunset-down"></ha-icon>${sun.set}</span>`
+            : ""}
+        </div>
+      `;
+    }
+
     _renderForecast(m) {
       const sum = this._forecastSummary(m);
-      if (!sum.id && !sum.text) return html``;
+      if (!sum.id && !sum.text && !this._sunTimes(m)) return html``;
       return html`
         <div class="forecast">
-          <span class="forecast-k">Forecast</span>
-          <span class="forecast-v">${sum.text || weatherLabel(sum.nowCond)}</span>
+          ${sum.id || sum.text
+            ? html`
+                <span class="forecast-k">Forecast</span>
+                <span class="forecast-v">${sum.text || weatherLabel(sum.nowCond)}</span>
+              `
+            : ""}
+          ${this._renderSun(m)}
         </div>
       `;
     }
@@ -1223,6 +1352,7 @@
                     <span class="stat-v">${formatTemp(m.lo, m.unit)}</span>
                   </div>
                 </div>
+                ${m.showThermo ? this._renderSun(m) : ""}
               </div>
                 ${showHist
                   ? html`
@@ -1510,6 +1640,28 @@
           font-size: 1rem;
           font-weight: 650;
           line-height: 1.35;
+        }
+        .sun {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-top: 8px;
+          color: var(--secondary-text-color);
+          font-size: 0.82rem;
+          font-weight: 650;
+        }
+        .compact .sun {
+          margin-top: 6px;
+          font-size: 0.78rem;
+        }
+        .sun-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          white-space: nowrap;
+        }
+        .sun ha-icon {
+          --mdc-icon-size: 16px;
         }
         .thermo-svg {
           width: 100%;
@@ -1919,6 +2071,7 @@
             { name: "show_humidity", selector: { boolean: {} } },
             { name: "show_feels", selector: { boolean: {} } },
             { name: "show_thermometer", selector: { boolean: {} } },
+            { name: "show_sun", selector: { boolean: {} } },
             { name: "compact", selector: { boolean: {} } },
           ]}
           .computeLabel=${(s) =>
@@ -1937,6 +2090,7 @@
               show_humidity: "Show humidity",
               show_feels: "Show heat-index when hot",
               show_thermometer: "Show thermometer plaque",
+              show_sun: "Show sunrise / sunset",
               compact: "Compact (activity rotator)",
             })[s.name] || s.name}
           @value-changed=${this._valueChanged}

@@ -4,7 +4,7 @@
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=randrcomputers&repository=ha-outdoor-temp-card&category=plugin)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Lovelace **outdoor thermometer** Use your backyard sensor at home, or any US **ZIP code** for another city. The big temperature changes color with the weather, the city sits under the number, and the upper-right corner shows that town’s local time (`9:38 PM CT`).
+Lovelace **outdoor thermometer** — not a thermostat. Use your backyard sensor at home, or any US **ZIP code** for another city. The big temperature changes color with the weather, the city sits under the number, and the upper-right corner shows that town’s local time (`9:38 PM CT`).
 
 ![Outdoor Temp Plus Card](media/preview.png)
 
@@ -141,6 +141,7 @@ Set **Card size** to **50%** in the editor, or `size: 50` in YAML, to shrink the
 | City | `city`, or the ZIP place name, or Home Assistant’s map location |
 | Local time | Upper right, same size as the title — home TZ or the ZIP city’s clock |
 | Forecast | Tonight + tomorrow from `weather_entity` or the ZIP forecast |
+| Sunrise / sunset | Under the forecast — today’s times for that city (`mdi:weather-sunset-up` / `mdi:weather-sunset-down`) |
 | Humidity | Local humidity sensor, or the ZIP weather |
 | Wind | `weather_entity` or the ZIP weather |
 | Today high / low | Recorder (home) or the ZIP daily forecast |
@@ -169,6 +170,7 @@ All of these are in the visual editor. YAML names match the editor labels below.
 | `show_humidity` | Show humidity | no | `true` | Humidity reading |
 | `show_feels` | Show heat-index when hot | no | `true` | Editor option; the compact row shows **Wind** |
 | `show_thermometer` | Show thermometer plaque | no | `true` | Off = forecast layout on every screen |
+| `show_sun` | Show sunrise / sunset | no | `true` | Times under the forecast, in that city’s timezone |
 | `compact` | Compact (activity rotator) | no | `false` | Hides history and tightens the layout |
 
 ### Example with every option
@@ -187,6 +189,7 @@ show_history: true
 show_humidity: true
 show_feels: true
 show_thermometer: true
+show_sun: true
 compact: false
 ```
 

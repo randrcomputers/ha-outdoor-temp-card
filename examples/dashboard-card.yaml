@@ -16,6 +16,7 @@ history_days: 14
 show_history: true
 show_humidity: true
 show_thermometer: true
+show_sun: true
 compact: false
 
 # Phone / activity-rotator home card
