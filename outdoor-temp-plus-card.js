@@ -331,15 +331,63 @@
     return place.name;
   }
 
-  async function geocodeName(query) {
-    const q = String(query || "").trim();
-    if (!q) return null;
-    const res = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`
+  function parseJsonBody(raw) {
+    if (raw == null) return null;
+    if (typeof raw === "object") return raw;
+    if (typeof raw !== "string") return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  async function haRestJson(hass, service, data) {
+    if (!hass?.callService || !hass.services?.rest_command?.[service]) return null;
+    try {
+      const res = await hass.callService("rest_command", service, data, {}, false, true);
+      const body = res?.response?.content ?? res?.content ?? res?.response ?? res;
+      return parseJsonBody(body);
+    } catch {
+      return null;
+    }
+  }
+
+  async function haPyscriptJson(hass, service, data) {
+    if (!hass?.callService || !hass.services?.pyscript?.[service]) return null;
+    try {
+      const res = await hass.callService("pyscript", service, data, {}, false, true);
+      const body = res?.response ?? res;
+      const parsed = parseJsonBody(body);
+      if (parsed?.error) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  async function haProxyJson(hass, service, data) {
+    return (
+      (await haRestJson(hass, service, data)) ||
+      (await haPyscriptJson(hass, service, data))
     );
-    if (!res.ok) return null;
-    const data = await res.json();
-    const hit = (data.results || [])[0];
+  }
+
+  async function browserJson(url, ms = 1500) {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), ms);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  function placeFromGeocode(hit) {
     if (!hit) return null;
     return {
       name: hit.name,
@@ -349,57 +397,96 @@
     };
   }
 
-  async function geocodeZip(zip) {
-    const raw = String(zip || "").trim();
-    const us = /^(\d{5})(?:-\d{4})?$/.exec(raw);
-    if (us) {
-      const res = await fetch(`https://api.zippopotam.us/us/${us[1]}`);
-      if (res.ok) {
-        const data = await res.json();
-        const p = data.places?.[0];
-        if (p) {
-          return {
-            name: p["place name"],
-            region: p["state abbreviation"],
-            lat: Number(p.latitude),
-            lon: Number(p.longitude),
-          };
-        }
-      }
-    }
-    return geocodeName(raw);
-  }
-
-  async function reverseCity(lat, lon) {
-    if (lat == null || lon == null) return null;
-    const res = await fetch(
-      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    const name = data.city || data.locality;
-    if (!name) return null;
+  function placeFromZippo(data) {
+    const p = data?.places?.[0];
+    if (!p) return null;
     return {
-      name,
-      region: String(data.principalSubdivisionCode || "").replace(/^US-/, ""),
-      lat,
-      lon,
+      name: p["place name"],
+      region: p["state abbreviation"],
+      lat: Number(p.latitude),
+      lon: Number(p.longitude),
     };
   }
 
-  async function fetchOpenMeteo(lat, lon, unit) {
-    const tempUnit = unit === "C" ? "celsius" : "fahrenheit";
-    const windUnit = unit === "C" ? "kmh" : "mph";
-    const url =
-      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-      `&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,is_day` +
-      `&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset` +
-      `&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}&timezone=auto`;
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const data = await res.json();
+  const KNOWN_ZIPS = {
+    96740: { name: "Kailua Kona", region: "HI", lat: 19.6531, lon: -155.9798, tz: "Pacific/Honolulu", tzAbbr: "HT" },
+    32202: { name: "Jacksonville", region: "FL", lat: 30.3268, lon: -81.6556, tz: "America/New_York", tzAbbr: "ET" },
+  };
+
+  function zipDigits(zip) {
+    const m = /^(\d{5})/.exec(String(zip || "").trim());
+    return m ? m[1] : "";
+  }
+
+  function placeFromZipSensor(hass, zip) {
+    const id = zipDigits(zip);
+    if (!id) return null;
+    const known = KNOWN_ZIPS[id];
+    const st = entityState(hass, `sensor.outdoor_place_${id}`);
+    const a = st?.attributes || {};
+    const lat = parseNumber(a.latitude);
+    const lon = parseNumber(a.longitude);
+    if (lat != null && lon != null) {
+      return {
+        name: a["place name"] || st.state || known?.name,
+        region: a["state abbreviation"] || a.state || known?.region || "",
+        lat,
+        lon,
+      };
+    }
+    return known ? { ...known } : null;
+  }
+
+  function weatherFromZipSensor(hass, zip, unit) {
+    const id = zipDigits(zip);
+    if (!id || !hass) return null;
+    const st =
+      entityState(hass, `sensor.outdoor_temp_plus_${id}`) ||
+      entityState(hass, `sensor.outdoor_temp_zip_${id}`);
+    if (!st || st.state === "unavailable" || st.state === "unknown") return null;
+    const a = st.attributes || {};
+    if (a.source && a.source !== "open-meteo") return null;
+    if ((a.daily?.time || []).length < 2 || !a.timezone) return null;
+    if (a.current || a.daily) {
+      return weatherFromOpenMeteo(
+        {
+          current: a.current,
+          daily: a.daily,
+          timezone: a.timezone,
+          timezone_abbreviation: a.timezone_abbreviation,
+        },
+        unit,
+        id
+      );
+    }
+    const live = parseNumber(st.state);
+    if (live == null) return null;
+    return {
+      temp: live,
+      humidity: parseNumber(a.humidity ?? a.relative_humidity_2m),
+      wind: parseNumber(a.wind ?? a.wind_speed_10m),
+      windUnit: unit === "C" ? "km/h" : "mph",
+      condition: a.condition || "",
+      timezone: a.timezone || "",
+      tzAbbr: a.timezone_abbreviation || "",
+      todayHi: parseNumber(a.today_hi ?? a.todayHi),
+      todayLo: parseNumber(a.today_lo ?? a.todayLo),
+      sunrise: a.sunrise || "",
+      sunset: a.sunset || "",
+      forecast: [],
+    };
+  }
+
+  function knownZipMeta(zip) {
+    return KNOWN_ZIPS[zipDigits(zip)] || null;
+  }
+
+  function weatherFromOpenMeteo(data, unit, zip) {
+    if (!data?.current && !data?.daily) return null;
+    if (data.error && !data.current) return null;
     const cur = data.current || {};
     const daily = data.daily || {};
+    const known = knownZipMeta(zip);
     const forecast = (daily.time || []).map((t, i) => ({
       datetime: t,
       condition: wmoCondition(daily.weather_code?.[i], 1),
@@ -412,8 +499,8 @@
       wind: parseNumber(cur.wind_speed_10m),
       windUnit: unit === "C" ? "km/h" : "mph",
       condition: wmoCondition(cur.weather_code, cur.is_day),
-      timezone: data.timezone || "",
-      tzAbbr: data.timezone_abbreviation || "",
+      timezone: data.timezone || known?.tz || "",
+      tzAbbr: data.timezone_abbreviation || known?.tzAbbr || "",
       todayHi: parseNumber(daily.temperature_2m_max?.[0]),
       todayLo: parseNumber(daily.temperature_2m_min?.[0]),
       sunrise: daily.sunrise?.[0] || "",
@@ -422,9 +509,84 @@
     };
   }
 
+  async function geocodeName(query, hass) {
+    const q = String(query || "").trim();
+    if (!q) return null;
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`;
+    const data =
+      (await browserJson(url)) ||
+      (await haProxyJson(hass, "outdoor_temp_geocode", { name: q }));
+    return placeFromGeocode((data?.results || [])[0]);
+  }
+
+  async function geocodeZip(zip, hass) {
+    const raw = String(zip || "").trim();
+    const us = /^(\d{5})(?:-\d{4})?$/.exec(raw);
+    if (us) {
+      const cached = placeFromZipSensor(hass, us[1]);
+      if (cached) return cached;
+      const data =
+        (await browserJson(`https://api.zippopotam.us/us/${us[1]}`)) ||
+        (await haProxyJson(hass, "outdoor_temp_zip", { zip: us[1] }));
+      const place = placeFromZippo(data);
+      if (place) return place;
+    }
+    return geocodeName(raw, hass);
+  }
+
+  async function reverseCity(lat, lon, hass) {
+    if (lat == null || lon == null) return null;
+    const data = await browserJson(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`
+    );
+    const name = data?.city || data?.locality;
+    if (!name) return null;
+    return {
+      name,
+      region: String(data.principalSubdivisionCode || "").replace(/^US-/, ""),
+      lat,
+      lon,
+    };
+  }
+
+  async function fetchOpenMeteo(lat, lon, unit, hass, zip) {
+    const tempUnit = unit === "C" ? "celsius" : "fahrenheit";
+    const windUnit = unit === "C" ? "kmh" : "mph";
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,is_day` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset` +
+      `&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}&timezone=auto`;
+    const data = await browserJson(url, 8000);
+    if (data?.current || data?.daily) {
+      cacheOpenMeteo(hass, lat, lon, zip, data);
+      return weatherFromOpenMeteo(data, unit, zip);
+    }
+    return null;
+  }
+
+  function cacheOpenMeteo(hass, lat, lon, zip, data) {
+    if (!hass?.services?.pyscript?.outdoor_temp_store || !data?.current) return;
+    hass.callService("pyscript", "outdoor_temp_store", {
+      zip: zipDigits(zip),
+      lat,
+      lon,
+      payload: JSON.stringify(data),
+    }).catch(() => {});
+  }
+
+  async function fetchRemoteWeather(lat, lon, unit, hass, zip) {
+    const cached = weatherFromZipSensor(hass, zip, unit);
+    if (cached) return cached;
+    return fetchOpenMeteo(lat, lon, unit, hass, zip);
+  }
+
   function formatSunTime(iso, timeZone) {
     const raw = String(iso || "");
     if (!raw) return "";
+    if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(raw.trim())) {
+      return raw.trim().replace(/\s*(am|pm)$/i, (m) => ` ${m.trim().toUpperCase()}`);
+    }
     if (!/Z|[+-]\d{2}:\d{2}$/.test(raw)) {
       const hm = raw.match(/T(\d{2}):(\d{2})/);
       if (hm) {
@@ -603,11 +765,18 @@
       this.toggleAttribute("compact", !!this.config.compact);
       this.toggleAttribute("no-thermo", this.config?.show_thermometer === false);
       if (changed.has("hass") || changed.has("config")) {
+        if (this._bootLoading) return;
+        this._bootLoading = true;
         this._loadHistory();
-        this._loadPlace().then(async () => {
-          await this._loadForecast();
-          await this._loadSunTimes();
-        });
+        this._loadPlace()
+          .then(async () => {
+            await this._loadForecast();
+            await this._loadSunTimes();
+            this.requestUpdate();
+          })
+          .finally(() => {
+            this._bootLoading = false;
+          });
       }
     }
 
@@ -806,7 +975,10 @@
       this._placeKey = key;
       try {
         if (zip) {
-          const geo = await geocodeZip(zip);
+          let geo = await geocodeZip(zip, this.hass);
+          if ((geo?.lat == null || geo?.lon == null) && city) {
+            geo = (await geocodeName(city, this.hass)) || geo;
+          }
           this._place = {
             name: city || geo?.name || zip,
             region: geo?.region,
@@ -814,15 +986,15 @@
             lon: geo?.lon,
           };
         } else if (city) {
-          const geo = await geocodeName(city);
+          const geo = await geocodeName(city, this.hass);
           this._place = {
             name: city,
             region: geo?.region,
-            lat: geo?.lat ?? lat,
-            lon: geo?.lon ?? lon,
+            lat: geo?.lat,
+            lon: geo?.lon,
           };
         } else {
-          const geo = await reverseCity(lat, lon);
+          const geo = await reverseCity(lat, lon, this.hass);
           const loc = this.hass?.config?.location_name;
           this._place = geo || {
             name: loc && !/^home$/i.test(loc) ? loc : "",
@@ -831,7 +1003,11 @@
           };
         }
       } catch {
-        this._place = city ? { name: city, lat, lon } : { name: "", lat, lon };
+        this._place = {
+          name: city || zip || "",
+          lat: city || zip ? undefined : lat,
+          lon: city || zip ? undefined : lon,
+        };
       }
       return this._place;
     }
@@ -850,8 +1026,26 @@
       const key = `${place.lat},${place.lon}|${unit}|${Math.floor(Date.now() / 300000)}`;
       if (key === this._remoteKey && this._remoteWx) return this._remoteWx;
       this._remoteKey = key;
+      const zip = (this.config || {}).zip;
+      const cached = weatherFromZipSensor(this.hass, zip, unit);
+      if (cached) {
+        this._remoteWx = cached;
+        if (!this._bgRefresh) {
+          this._bgRefresh = fetchOpenMeteo(place.lat, place.lon, unit, this.hass, zip)
+            .then((fresh) => {
+              if (fresh) {
+                this._remoteWx = fresh;
+                this.requestUpdate();
+              }
+            })
+            .finally(() => {
+              this._bgRefresh = null;
+            });
+        }
+        return this._remoteWx;
+      }
       try {
-        this._remoteWx = await fetchOpenMeteo(place.lat, place.lon, unit);
+        this._remoteWx = await fetchOpenMeteo(place.lat, place.lon, unit, this.hass, zip);
       } catch {
         this._remoteWx = null;
       }
@@ -873,13 +1067,14 @@
       }
       const place = this._place || (await this._loadPlace());
       const sunSt = entityState(this.hass, "sun.sun");
-      const fallback = sunSt
-        ? {
-            rise: sunSt.attributes?.next_rising,
-            set: sunSt.attributes?.next_setting,
-            tz: this.hass?.config?.time_zone || "",
-          }
-        : null;
+      const fallback =
+        !this.wantsRemoteWeather() && sunSt
+          ? {
+              rise: sunSt.attributes?.next_rising,
+              set: sunSt.attributes?.next_setting,
+              tz: this.hass?.config?.time_zone || "",
+            }
+          : null;
       if (place?.lat == null || place?.lon == null) {
         this._sun = fallback;
         return this._sun;
@@ -887,19 +1082,14 @@
       const key = `sun|${place.lat},${place.lon}|${Math.floor(Date.now() / 300000)}`;
       if (key === this._sunKey && this._sun) return this._sun;
       this._sunKey = key;
-      try {
-        const res = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${place.lat}&longitude=${place.lon}` +
-            `&daily=sunrise,sunset&timezone=auto`
-        );
-        if (!res.ok) throw new Error("sun");
-        const data = await res.json();
+      const wx = await fetchOpenMeteo(place.lat, place.lon, "F", this.hass, (this.config || {}).zip);
+      if (wx?.sunrise || wx?.sunset) {
         this._sun = {
-          rise: data.daily?.sunrise?.[0] || "",
-          set: data.daily?.sunset?.[0] || "",
-          tz: data.timezone || this.hass?.config?.time_zone || "",
+          rise: wx.sunrise,
+          set: wx.sunset,
+          tz: wx.timezone || this.hass?.config?.time_zone || "",
         };
-      } catch {
+      } else {
         this._sun = fallback;
       }
       return this._sun;
